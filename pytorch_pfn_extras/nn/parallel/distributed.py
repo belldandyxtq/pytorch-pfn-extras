@@ -190,6 +190,7 @@ class DistributedDataParallel(nn.Module):
 
         # add hook to launch synchronization
         self.register_backward_hook(self._backward_hook)
+        self.backward_count = 0
 
     @contextmanager
     def no_sync(self):
@@ -226,6 +227,7 @@ class DistributedDataParallel(nn.Module):
 
     def _backward_hook(self, module, gin, gout):
         def _synchronize():
+            print("start of _synchronize")
             if not self._require_sync:
                 return
 
@@ -243,9 +245,24 @@ class DistributedDataParallel(nn.Module):
                         device=self._device
                     )
 
+                    print("start of all_reduce")
                     # cast to long because bool may not be used in all_reduce
                     has_grads = has_grads.long()
-                    dist.all_reduce(has_grads, op=dist.ReduceOp.MAX)
+                    print("dist is inited {}".format(dist.get_backend()))
+                    print("dist get rank {}".format(dist.get_rank()))
+                    print("dist get world size {}".format(dist.get_world_size()))
+                    print("dist get backend {}".format(dist.get_backend()))
+
+                    receive_list = [torch.zeros([1], dtype=torch.int64, device="cuda:{}".format(dist.get_rank())) for _ in range(dist.get_world_size())]
+                    data = torch.tensor([dist.get_rank()], device="cuda:{}".format(dist.get_rank()), dtype=torch.int64)
+                    dist.all_gather(receive_list, data)
+                    print("backward called count is {}".format(self.backward_count))
+                    self.backward_count += 1
+                    print("receive_list is {}".format(receive_list))
+                    # dist.all_reduce(data)
+                    print("has_grads is {}".format(has_grads))
+                    # dist.all_reduce(has_grads, op=dist.ReduceOp.MAX)
+                    print("end of all_reduce")
 
                     for name, has_grad in zip(self._sorted_param_keys,
                                               has_grads.bool().cpu()):
@@ -259,15 +276,19 @@ class DistributedDataParallel(nn.Module):
                 grads = [params[name].grad for name in self._sorted_param_keys
                          if params[name].grad is not None]
                 groups = _group_by_type(grads)
-                for group in groups:
-                    self._reduce_function(group, self._process_group)
+                print("start of _reduce {}".format(self._reduce_function))
+                # for group in groups:
+                #     self._reduce_function(group, self._process_group)
 
                 if self._broadcast_buffers:
                     buffers = dict(self.named_buffers())
                     bufs = [buffers[name] for name in self._sorted_buffer_keys]
                     groups = _group_by_type(bufs)
+
+                    print("start of _broadcast_buffers")
                     for group in groups:
                         self._broadcast_function(group, self._process_group)
+                print("start of _broadcast_buffers")
 
         # PyTorch will invoke `_synchronize` after the backward computation.
         Variable._execution_engine.queue_callback(_synchronize)
